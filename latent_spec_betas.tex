@@ -1,0 +1,346 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{mathtools}
+\usepackage{titlesec}
+% \usepackage{amsmath,amssymb}
+\usepackage{amsfonts,amsmath,amssymb}
+\usepackage{cleveref}
+\usepackage{bm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{pifont}
+\usepackage{color}
+\usepackage[a4paper, total={6in, 8in}]{geometry}
+
+% TODO
+% check that \*z_k = (z_{k,1} ... z_{k,J}) is introduced correctly
+% handle initial states in M-Step section
+
+
+
+
+\crefname{section}{§}{§§}
+
+\DeclareMathOperator{\E}{\mathbb{E}}
+\DeclareMathOperator{\Pp}{\mathbb{P}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+
+\newcommand{\g}{\mathbf{g}}
+\newcommand{\m}{\mathbf{m}}
+\newcommand{\vv}{\mathbf{v}}
+\newcommand{\n}{\mathbf{n}}
+% \newcommand{\*x}{\mathbf{x}}
+\newcommand{\z}{\mathbf{z}}
+\newcommand{\G}{\mathbf{G}}
+\newcommand{\Hh}{\mathbf{H}}
+% \newcommand{\*x}{\mathbf{X}}
+\newcommand{\W}{\mathbf{W}}
+\newcommand{\V}{\mathbf{V}}
+\newcommand{\data}{\mathcal{D}}
+\newcommand{\tr}{\text{T}}
+
+\def\code#1{\texttt{#1}}
+\def\*#1{\mathbf{#1}}
+
+
+
+\title{Spectrogram Estimation for Spiking Data}
+\author{Andrew Song, John Tauber}
+\date{2021}
+
+\begin{document}
+
+\maketitle
+
+\section{Notation}
+The goal of this document will be to outline a generative model and inference
+framework for estimating a spectrogram from spiking observations. This will
+serve as the basis for combining with lfp data. The notation is as follows:
+
+\begin{align*}
+   &\text{window } k = 1, \ldots, K \\
+   &\text{timebin } j = 1, \ldots, J \text{ time within window K} \\
+   &n^c_{k,j} \in \{0,1\} := \text{spike data at time $j$ within window $k$ for neuron $c$} \\
+   &\lambda^c_{k,j} := \text{CIF at time $j$ in window $k$ for neuron c} \\
+   &\W \in \mathbb{C}^{J \times J} := \text{inverse-DFT matrix} \\
+   &\*x^{\text{T}} := \text{transpose of vector } \*x \\
+   &\*z_k\in\mathbb{C}^J := (z_{k,1} \ldots, z_{k,J} )^{\text{T}} 
+      \text{as in \cite{Kim2018}}\\
+   &\mathcal{L}(\cdot \mid \cdot) - \text{emphasizes likelihood function}
+\end{align*}
+
+\section{Generative Model}
+Assume we have a time series of spiking observations of length $T$ consisting of
+data from $C$ neurons. We divide the data into $K$ windows of length $J$, such
+that $T = KJ$.  We denote the full set of
+spiking observations as 
+\begin{equation*}
+   \data = \{n^c_{k,j}\}_{k=1, j=1, c=1}^{K,J,C}
+\end{equation*}
+
+We assume as our model for $\data$ a discrete-time approximation to a
+point process, where the conditional intensity function (CIF) for neuron $c$ at time $t = k+j$
+is a logistic function of a latent process $X_t$
+\begin{equation}
+   \lambda^c_{k,j} = \frac{1}{1 + \exp(-(\mu^c + \beta^c x_{k,j}))}
+\end{equation}
+such that, for $c = 1, \ldots, C$: 
+\begin{equation}
+   n^c_{k,j} \sim \text{Bernoulli}(\lambda^c_{k,j})
+\end{equation}
+
+We assume that in each window $k$ the latent process $X_k,j$ is second-order
+stationary. Letting $\*x_k$ denote $(x_{k,1}, \ldots, x_{k,J})^{\text{T}}$, and
+following the approach of \cite{Kim2018}, we let: 
+\begin{equation}
+   \*x_k = \W \*z_k
+\end{equation}
+where $\W$ is an inverse spectral transformation matrix (see Appendix B1), and
+$\*z_k$ is the random walk process across the windows:
+\begin{equation}
+   \*z_k = \*z_{k-1} + \nu_k \quad \quad \nu_k \sim \mathcal{N}(0, 
+      \operatorname{diag}(\sigma_{\nu,1}^2,\ldots, \sigma_{\nu,J}^2))
+\end{equation}
+
+Note that without the prior $\*z_k = \*z_{k-1} + \nu_k$, we
+could estimate the $\*z_k$ independently across the windows as in
+\cite{Miran2017}. However, we would like to have the stochastic continuity
+constraint, as this provides denoising of the spectrogram - when estimating a
+spectrogram in a specific window, the algorithm effectively pools together
+estimates from neighboring windows~\cite{Kim2018}. We also add there are
+different ways to encode stochastic continuity, such as through integrated
+Wiener Process (IWP)~\cite{Song18}. This completes the setup of the generative
+model. 
+
+\section{Inference}
+Let $\theta = \{\sigma^2_{\nu,j}, \mu^c, \beta^c \}_{j=1,c=1}^{J,C}$. For
+inference, we are interested in 1) parameter estimation of $\theta$ to obtain
+$\widehat{\theta}$ and 2) computation of the posterior distribution $\Pp
+(\*z_k\mid \data, \widehat{\theta})$. The complete-data likelihood can be
+expressed as:
+\begin{align}
+   \log \mathcal{L}(\theta) &= \log \Pp(\data, \*z_{1:K} \mid \theta) \nonumber \\
+   &= \log \Pp (\data \mid \*z_{1:K}, \theta) + \log \Pp(\*z_{1:K} \mid \theta),
+\end{align}
+which under our generative model is:
+\begin{align}
+      \sum_{k=1}^K & \sum_{c=1}^C \sum_{j=1}^J  n_{k,j}^c (\mu^c + \beta^c (\text{W}\*z_k)_j)
+      - \log \big(1 + \exp( \mu^c + \beta^c (\text{W} \*z_k)_j) \big) \nonumber \\
+   &-(K\sum_{j=1}^J\log(\pi \sigma^2_{\nu,j}) - \sum_{k=1}^K \sum_{j=1}^J \frac{\mid \mid z_{k,j}  - 
+      z_{k-1,j} \mid \mid^2}{\sigma_{\epsilon, j}^2} 
+\end{align}
+Because we do not observe the $\*z_k$'s, however, we will look to
+expectation maximization for a solution, which leads us to a state space model
+construction. 
+
+However, the point-process likelihood (using either Poisson or binomial forms)
+presents a challenge, since the Gaussian prior on $\*z_k$ is not a conjugate
+prior to the likelihood. For this reason, we don't have access to the analytical
+form for the posterior distribution. A few solutions exist. First, one could use
+data-augmentation scheme via Polya-Gamma data augmentation~\cite{Polson13} and
+obtain Monte Carlo (MC) samples from the exact posterior distribution. With MC
+samples, one can approximate the required expectations in the E-step, leading to
+Monte Carlo EM (MCEM)~\cite{Zhang18}.\\\\
+The second option is to be make a Laplace approximation to the binomial
+likelihood. The naive approach (Laplace approximation to the entire data) would
+be computationally expensive, as this results in a covariance matrix of dimension
+$KJ\times KJ$. Rather, we make the following observations: 1) if the
+observations were instead complex Gaussian instead of Binomial, the problem
+would be reduced to a frequency domain Kalman filter (FDKF) as in
+\cite{Kim2018}, and 2) for a given window $k$, we can use a Laplace
+approximation to the point process spectra as in \cite{Miran2017}. See Appendix
+B2 for details. 
+\newline
+
+\section{Algorithm}
+
+
+At the $(s+1)^{\text{th}}$ iteration of the EM algorithm, we want to take the
+expectation of the complete data log-likelihood $\log \mathcal{L}(\theta)$ with
+respect to the posterior distribution $\Pp(\*z_{1:K}|\data,\theta^{(s)})$. We
+thus have
+\begin{align}
+   \E [\log \mathcal{L}(\theta)\,|\,\data,\theta^{(s)}] &= \E [\log \Pp(\data, \*z_{1:K} \mid \theta)\,|\,\data,\theta^{(s)}] \nonumber \\
+   &= \E [\log \Pp (\data \mid \*z_{1:K}, \theta) + \log \Pp(_{1:K} \mid \theta)\,|\,\data,\theta^{(s)} ], \nonumber
+\end{align}
+which under our model is
+\begin{align}\label{eq:qfunc}
+   \E [\log \mathcal{L}(\theta)|\data,\theta^{(s)}]=\E & \Bigg[ \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C n_{k,j}^c (\mu^c + \beta^c (\text{W}\*z_k)_j) 
+      - \log \big(1 + \exp( \mu^c + \beta^c (\text{W} \*z_k)_j ) \big) \nonumber \\  
+   & -(K\sum_{j=1}^J\log(\pi \sigma^2_{\nu,j}) - \sum_{k=1}^K \sum_{j=1}^J \frac{\mid \mid z_{k,j}  - 
+      z_{k-1,j}  \mid \mid^2}{\sigma_{\nu, j}^2} \,\Big|\,\data,\theta^{(s)}\Bigg].
+\end{align}
+The following quantities are needed for computing the expectation in
+Eq.~(\ref{eq:qfunc})
+\begin{equation}\label{eq:exps}
+   \begin{split}
+   \*z_{k \mid K}  &= \E [ \*z_k \mid 
+      \data, \theta^{(s)}] \\
+   \Lambda_{k \mid K} &= \E [ || \*z_k ||^2 
+      \mid \data, \theta^{{(s)}}] \\
+   \Lambda_{k, k-1 \mid K} &= \E [ \*z_k \*z^*_{k-1}  
+      \mid \data, \theta^{{(s)}}]
+   \end{split}
+\end{equation}
+\subsection{Filter}
+These quantities can be efficiently computed using a Kalman filtering and
+smoothing algorithm. Let us focus primarily on the Kalman filtering, as the
+Kalman smoother is straightforward once we compute the prediction/update
+quantities in the filter step. First the one-step prediction for filtering is
+simply given as
+\begin{equation}
+    \begin{split}
+    \*z_{k \mid k-1} &= \*z_{k-1 \mid k-1}  \\
+   \sigma^2_{k \mid k-1,j} &= \sigma^2_{k-1 \mid k-1, j} + \sigma^2_{\nu, j}. \\
+   \end{split}
+\end{equation}
+The one-step update requires more attention, due to the fact that $\Pp
+(\data_k|\*z_k)$ is not a Gaussian distribution. To this end, we perform
+Gaussian approximation, i.e., Laplace approximation, to the posterior
+distribution $\Pp (\*z_k \mid \data_{1:k},\theta)$, such that $\Pp (\*z_k \mid
+\data_{1:k},\theta)\sim
+\mathcal{N}(\*z_{k|k},\operatorname{diag}(\sigma_{k|k,1}^2,\ldots,\sigma_{k|k,J}^2))$~\cite{Smith03}.\\
+
+Using Bayes's rule on $\Pp (\*z_k \mid \data_{1:k})$ (we drop $\theta$ for notational simplicity), we have
+\begin{equation}\label{eq:kf_bayes}
+    \begin{split}
+   \Pp ( \*z_k \mid \data_{1:k}) & \propto\int\Pp(\data_k,\*z_k, \*z_{k-1}|\data_{1:k-1})\,d(\*z_{k-1})\\
+   & =
+      \int\Pp (\data_k \mid\*z_k) 
+      \Pp (\*z_k \mid\*z_{k-1})\Pp(\*z_{k-1}| \data_{1:k-1}) \,d(\*z_{k-1}) \\
+  & =
+      \Pp (\data_k \mid\*z_k) \underbrace{\int
+      \Pp (\*z_k \mid\*z_{k-1})\overbrace{\Pp(\*z_{k-1}| \data_{1:k-1})}^{\data(\*z_{k-1|k-1},\Sigma_{k-1|k-1})} \,d(\*z_{k-1})}_{\Pp (\*z_k \mid \data_{1:k-1})=\data(\*z_{k|k-1},\Sigma_{k|k-1})} \\
+   &= \Pp (\data_k \mid \*z_k) \Pp (\*z_k \mid \data_{1:k-1}).
+      \end{split}
+\end{equation}
+Note that all conditional independence relations follow from our generative
+model. With Eq.~(\ref{eq:kf_bayes}), we can proceed with the Laplace
+approximation as follows
+\begin{equation}
+    \begin{split}
+      \*z_{k|k}&=\argmax_{\*z_k}\log \Pp(\*z_k | \data_{1:k})\\
+      &=\argmax_{\*z_k}\{\log\Pp (\data_k \mid \*z_k) +\log\Pp (\*z_k \mid \data_{1:k-1})\}\\
+      &= \argmax_{\*z_k} \Big\{ \sum_{c=1}^C \sum_{j=1}^J n_{k,j}^c ( \mu^c + \beta^c (\W \*z_k)_j) 
+         - \log \big(1 + \exp ( \mu^c + \beta^c(\W \*z_k )_j ) \big)\\
+      &\quad \quad \quad \quad \quad \quad - \sum_{j=1}^J \frac{|| z_{k,j} - 
+         z_{k|k-1,j}||^2} {\sigma^2_{\nu,j}}\Big\}.
+    \end{split}
+\end{equation}
+To compute $\Sigma_{k|k}$, we compute Hessian of both sides. The full details are given in \ref{Newton}
+
+% TODO Update for pp params
+\subsection{Newton's Method for State Update}
+\begin{algorithm}
+\caption{Newton's Method for Window $k$ Gaussian Approximation}
+\label{Newton}
+\begin{algorithmic}[1]
+\State $\z^{(0)} = \mathbf{0}; \quad i=0$
+\State $\bar{n} = \sum_{c=1}^C n^c_{k,j}$
+\While {$\text{crit} = 0$}
+\State $i \leftarrow i + 1$
+\State $\*x = \W \z^{(i-1)}$
+\State $\lambda = \frac{1}{1 + e^{\*x}}$
+\State $\vv = \Big(\frac{z_1^{(i-1)} - \*z_{k-1 \mid k-1}(\omega_1)}{\sigma^{2(s)}_{\nu,1}},
+   \cdots, \frac{z_J^{(i-1)} - \*z_{k-1 \mid k-1}(\omega_J)}{\sigma^{2(s)}_{\nu,J}} \Big)^{\tr}$
+\State $\g = C\W^{\tr}(\bar{\n} - \lambda) - \vv \quad$ 
+\State $\V = \text{diag}\Big( \frac{1}{\sigma^{2(s)}_{\nu,1}}, \cdots, 
+   \frac{1}{\sigma^{2(s)}_{\nu,J}}\Big)$
+\State $\G = \text{diag}\Big(\frac{e^{x_1}}{(1+e^{x_1})^2}, \cdots, \frac{e^{x_K}}{(1+e^{x_K})^2} \Big) $
+\State $\Hh = -C \W^{\tr} \G \W - \V \quad$ 
+\State $\z^{(i)} = \z^{(i-1)} - \Hh^{-1}\g$
+\EndWhile
+\State $\*z^{(s+1)}_{k \mid k} = \z^{(i)}$
+\State $\*x = \W \z^{(1)}$
+\State $\G = \text{diag}\Big(\frac{e^{x_1}}{(1+e^{x_1})^2}, \cdots, \frac{e^{x_K}}{(1+e^{x_K})^2} \Big) $
+\State $\Hh = -C \W^{\tr} \G \W - \V \quad$ 
+\State $\sigma^{2(s+1)}_{k \mid k, j} = - \frac{1}{\Hh_{(j,j)}}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Smoother}
+The smoothing algorithm is performed as in \cite{Kim2018}:
+\begin{equation}
+   \begin{split}
+      G_{k,j} &= \sigma^2_{k \mid k, j} (\sigma^2_{k + 1\mid k, j})^{-1} \\
+      z_{k \mid K,j} &= z_{k \mid k, j} 
+         + G_{k,j} ( z_{k+1 \mid K, j} - z_{k+1 \mid k,j} ) \\
+      \sigma^2_{k \mid K,j} &= \sigma^2_{k\mid k,j} + G^2_{k,j}(\sigma^2_{k+1 \mid K} 
+         - \sigma^2_{k+1 \mid k, j})
+   \end{split}
+\end{equation}
+
+% TODO update/understand sigmas (add summation over j) to Q func
+% TODO check sigma MLE with new babadi paper
+\subsection{M-Step}
+In the M-Step, we maximize the expected log-likelihood of Eq.~(\ref{eq:qfunc}),
+using the values computed in Eqs.~(\ref{eq:exps}). Omitting the initial state
+and variance for now, for a given frequency $j$ we have:
+% TODO - need to add initial state 
+\begin{equation}\label{eq:Q}
+   \begin{split}
+      Q(\theta \mid \theta^{(s)}) &= \E [\log \mathcal{L}_j(\theta)|\data,\theta^{(s)}] \\
+      &= \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C n_{k,j}^c (\mu^c + \beta^c (\text{W}\*z_{k \mid K})_j) \\
+      &- \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C \E \Big[ \log \big(1 + \exp( \mu^c + \beta^c (\text{W} \*z_k)_j ) \big) \Big ]\\
+      &- \sum_{j=1}^J (K)\log(\sigma^2_{\nu,j}) - \frac{1}{\sigma^2_{\nu,j}}
+      \sum_{k=1}^K \Big(\Lambda_{k \mid K,j} + -2\Lambda_{k,k-1 \mid K, j} + \Lambda_{k-1 \mid K, j}\Big) %\\
+      % & + \text{const.}
+   \end{split}
+\end{equation}
+% TODO write out expectations in (8) as is done in Abbas
+% ok, approach here: let SSMT code/paper guide this
+For the process variances we calculate a closed-form maximum likelihood estimate (MLE):
+% TODO fix for initial state
+\begin{equation}\label{eq:sigma_mle}
+   \hat{\sigma}^2_{\nu,j} = \frac{1}{K} \sum_{k=1}^K \Big(\Lambda_{k \mid K,j} + 
+   -2\Lambda_{k,k-1 \mid K, j} + \Lambda_{k-1 \mid K, j}\Big) \\
+\end{equation}
+where the values in Eqs.~(\ref{eq:exps}) are computed as
+\begin{equation}\label{exps_est}
+   \begin{split}
+      \Lambda_{k\mid K,j} &= z_{k \mid K,j}^2  + \sigma^2_{k \mid K,j} \\
+      \Lambda_{k,k-1 \mid K, j} &= z_{k \mid K,j}  z^*_{k-1 \mid K,j} 
+         + G_{k-1,j} \sigma^2_{k\mid K,j}
+   \end{split}
+\end{equation}
+
+The remaining expectation in Eq.~(\ref{eq:Q}) does not have a simple closed form
+solution. In order to find estimates for $\mu^c$ and $\beta^c$, we proceed with
+a Monte-Carlo EM procedure to approximate the expectation and find the MLE
+numerically. We maximize the function $R$:
+\begin{equation}
+   \begin{split}
+      R(\mu^1, \beta^1, \ldots, \mu^C, \beta^C) &= \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C n_{k,j}^c (\mu^c + \beta^c (\text{W}\*z_{k \mid K})_j) \\
+      &- \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C \sum_{m=1}^M \log \big(1 + \exp( \mu^c + \beta^c (\text{W} \*z_k^{(m)})_j ) \big) \\
+      \simeq \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C n_{k,j}^c &(\mu^c + \beta^c (\text{W}\*z_{k \mid K})_j) 
+         - \sum_{k=1}^K \sum_{j=1}^J \sum_{c=1}^C \E \Big[ \log \big(1 + \exp( \mu^c + \beta^c (\text{W} \*z_k)_j ) \big) \Big ]\\
+   \end{split}
+\end{equation}
+
+\noindent where $\*z_1^{(m)}, \ldots, \*z_K^{(m)}$ are draws from the posterior
+distribution over $\*z_1, \ldots, \*z_K$ computed during the E-Step. The gradients are computed using
+\begin{equation}
+   \begin{split}
+      \frac{\partial R}{\partial \mu^c} &= \sum_{k=1}^K \sum_{j=1}^J n_{k,j}^c 
+         - \sum_{k=1}^K \sum_{j=1}^J \sum_{m=1}^M \frac{\exp( \mu^c + \beta^c (\text{W} \*z_k^{(m)})_j )}{1 + \exp( \mu^c + \beta^c (\text{W} \*z_k^{(m)})_j ) } \\
+      \frac{\partial R}{\partial \beta^c} &= \sum_{k=1}^K \sum_{j=1}^J n_{k,j}^c(\text{W} \*z_{k \mid K})_j 
+         - \sum_{k=1}^K \sum_{j=1}^J \sum_{m=1}^M \frac{(\text{W} \*z_k^{(m)})_j \exp( \mu^c + \beta^c (\text{W} \*z_k)_j )}{1 + \exp( \mu^c + \beta^c (\text{W} \*z_k^{(m)})_j ) } \\
+   \end{split}
+\end{equation}
+
+% TODO 
+
+
+
+% I am unsure about the form / derivation of Eqs.~(\ref{exps_est}), although it seems to be what is
+% implemented in the code for \cite{Kim2018}. Also, note that in \cite{Kim2018},
+% they use Re$(\Lambda_{k,k-1 \mid K, j})$. I have been unable to figure out why
+% that is the case, or what ramifications that may have on our implementation.  
+
+\newpage
+\bibliographystyle{unsrt}
+\bibliography{specspike}
+
+\end{document}
+
